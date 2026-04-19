@@ -1,0 +1,8 @@
+flask
+joblib
+neurokit2
+numpy
+pandas
+pylsl
+scikit-learn
+xgboost
