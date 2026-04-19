@@ -4,5 +4,17 @@
     "baseline_mean": 0.1761,
     "baseline_std": 0.0783,
     "created": "2026-04-17 17:01"
+  },
+  "Ayuri": {
+    "threshold": 0.8548,
+    "baseline_mean": 0.4206,
+    "baseline_std": 0.2895,
+    "created": "2026-04-18 15:53"
+  },
+  "Kshitij": {
+    "threshold": 0.806,
+    "baseline_mean": 0.5035,
+    "baseline_std": 0.2017,
+    "created": "2026-04-18 17:03"
   }
 }
