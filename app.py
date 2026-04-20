@@ -1144,17 +1144,7 @@ es.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   if (msg.type === "ping") return;
 
-  if (msg.type === "export_done") {
-    const btn    = document.getElementById('btn-export');
-    const status = document.getElementById('export-status');
-    btn.disabled = false;
-    btn.textContent = '\u23fa Record';
-    status.textContent = 'Downloading\u2026';
-    window.location.href = '/api/export/signals';
-    setTimeout(() => { window.open('/api/export/predictions', '_blank'); }, 800);
-    setTimeout(() => { status.textContent = 'Done \u2713'; }, 1500);
-    return;
-  }
+  if (msg.type === "export_done") return;  // download is triggered client-side
 
   if (msg.type === "status") {
     msgBox.textContent = msg.data.message; msgBox.className = ""; return;
@@ -1249,14 +1239,45 @@ async function startExport() {
     status.textContent = 'Error starting export.';
     return;
   }
+
+  // Countdown
   let remaining = secs;
   btn.textContent = '\u23f9';
   status.textContent = `Recording\u2026 ${remaining}s left`;
   const iv = setInterval(() => {
     remaining--;
-    status.textContent = remaining > 0 ? `Recording\u2026 ${remaining}s left` : 'Finishing\u2026';
-    if (remaining <= 0) clearInterval(iv);
+    if (remaining > 0) {
+      status.textContent = `Recording\u2026 ${remaining}s left`;
+    } else {
+      clearInterval(iv);
+      triggerExportDownload(btn, status);
+    }
   }, 1000);
+}
+
+function triggerExportDownload(btn, status) {
+  status.textContent = 'Downloading\u2026';
+  // signals CSV — direct download
+  const a = document.createElement('a');
+  a.href = '/api/export/signals';
+  a.download = 'signals_export.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // predictions CSV — slight delay so browser doesn't block the second download
+  setTimeout(() => {
+    const b = document.createElement('a');
+    b.href = '/api/export/predictions';
+    b.download = 'predictions_export.csv';
+    document.body.appendChild(b);
+    b.click();
+    document.body.removeChild(b);
+  }, 600);
+  setTimeout(() => {
+    status.textContent = 'Done \u2713';
+    btn.textContent    = '\u23fa Record';
+    btn.disabled       = false;
+  }, 1200);
 }
 
 function toggleTheme() {
