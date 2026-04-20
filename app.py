@@ -299,9 +299,18 @@ def detection_worker():
                 if _export["active"]:
                     _export["pred_rows"].append((
                         ev["ts"], ev["prob"], label, ev["state"],
-                        metrics.get("hr"), metrics.get("rmssd"),
-                        metrics.get("lf_hf"), metrics.get("resp_rate"),
-                        metrics.get("resp_amp"),
+                        round(feats.get("hrv_meanNN",  float("nan")), 4),
+                        round(feats.get("hrv_sdnn",    float("nan")), 4),
+                        round(feats.get("hrv_rmssd",   float("nan")), 4),
+                        round(feats.get("hrv_pnn50",   float("nan")), 4),
+                        round(feats.get("hrv_lf",      float("nan")), 4),
+                        round(feats.get("hrv_hf",      float("nan")), 4),
+                        round(feats.get("hrv_lf_hf",   float("nan")), 4),
+                        round(feats.get("resp_rate_mean",      float("nan")), 4),
+                        round(feats.get("resp_rate_std",       float("nan")), 4),
+                        round(feats.get("resp_rate_min",       float("nan")), 4),
+                        round(feats.get("resp_rate_max",       float("nan")), 4),
+                        round(feats.get("resp_amplitude_mean", float("nan")), 4),
                     ))
 
     except Exception as e:
@@ -468,7 +477,10 @@ def api_export_predictions():
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["time", "prob", "label", "state",
-                "hr_bpm", "rmssd_ms", "lf_hf", "resp_rate_brpm", "resp_amp"])
+                "hrv_meanNN", "hrv_sdnn", "hrv_rmssd", "hrv_pnn50",
+                "hrv_lf", "hrv_hf", "hrv_lf_hf",
+                "resp_rate_mean", "resp_rate_std", "resp_rate_min",
+                "resp_rate_max", "resp_amplitude_mean"])
     w.writerows(rows)
     buf.seek(0)
     return Response(
