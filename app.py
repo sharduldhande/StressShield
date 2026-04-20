@@ -53,6 +53,19 @@ buf_resp = None
 active_profile    = None
 calibration_state = {"pending": False, "running": False, "name": None, "windows": []}
 
+# ── export state ─────────────────────────────────────────────────────────────
+
+_export: dict = {
+    "active":     False,
+    "sig_ts":     [],
+    "sig_ecg":    [],
+    "sig_resp":   [],
+    "pred_rows":  [],   # one tuple per 5-s prediction window
+    "duration":   0,
+    "started_at": None,
+}
+_export_lock = threading.Lock()
+
 # ── calibration persistence ───────────────────────────────────────────────────
 
 def load_calibrations() -> dict:
@@ -196,6 +209,18 @@ def detection_worker():
             resp_ds = [round(s[CH_RESP], 4) for i, s in enumerate(samples) if i % SIGNAL_DOWNSAMPLE == 0]
             if ecg_ds:
                 push_signal(ecg_ds, resp_ds)
+            with _export_lock:
+                if _export["active"]:
+                    elapsed = time.time() - _export["started_at"]
+                    if elapsed >= _export["duration"]:
+                        _export["active"] = False
+                        push("export_done", {})
+                    else:
+                        for s in samples:
+                            t = time.time() - _export["started_at"]
+                            _export["sig_ts"].append(round(t, 6))
+                            _export["sig_ecg"].append(round(s[CH_ECG], 6))
+                            _export["sig_resp"].append(round(s[CH_RESP], 6))
 
     threading.Thread(target=reader, daemon=True).start()
 
@@ -260,7 +285,7 @@ def detection_worker():
                 "resp_amp":  round(feats["resp_amplitude_mean"], 3),
             }
 
-            push("prediction", {
+            ev = {
                 "ts":        time.strftime("%H:%M:%S"),
                 "label":     label,
                 "state":     "Stress" if label == 1 else "Non-stress",
@@ -268,7 +293,16 @@ def detection_worker():
                 "threshold": round(threshold, 3),
                 "step_sec":  STEP_SEC,
                 "metrics":   metrics,
-            })
+            }
+            push("prediction", ev)
+            with _export_lock:
+                if _export["active"]:
+                    _export["pred_rows"].append((
+                        ev["ts"], ev["prob"], label, ev["state"],
+                        metrics.get("hr"), metrics.get("rmssd"),
+                        metrics.get("lf_hf"), metrics.get("resp_rate"),
+                        metrics.get("resp_amp"),
+                    ))
 
     except Exception as e:
         push("error", {"message": str(e)})
@@ -387,6 +421,63 @@ def api_delete_profile(name):
     return jsonify({"ok": True})
 
 
+# ── export routes ────────────────────────────────────────────────────────────
+
+@app.route("/api/export/start", methods=["POST"])
+def api_export_start():
+    import io, csv  # noqa: F401 — csv imported here; also used in download routes
+    seconds = int(request.json.get("seconds", 30))
+    seconds = max(1, min(seconds, 300))
+    with _export_lock:
+        _export.update(
+            active=True,
+            sig_ts=[], sig_ecg=[], sig_resp=[],
+            pred_rows=[],
+            duration=seconds,
+            started_at=time.time(),
+        )
+    return jsonify(ok=True, seconds=seconds)
+
+
+@app.route("/api/export/signals")
+def api_export_signals():
+    import io, csv
+    with _export_lock:
+        if _export["active"] or not _export["sig_ts"]:
+            return jsonify(error="No export ready"), 404
+        rows = list(zip(_export["sig_ts"], _export["sig_ecg"], _export["sig_resp"]))
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time_s", "ecg", "resp"])
+    w.writerows(rows)
+    buf.seek(0)
+    return Response(
+        buf,
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="signals_export.csv"'},
+    )
+
+
+@app.route("/api/export/predictions")
+def api_export_predictions():
+    import io, csv
+    with _export_lock:
+        if _export["active"] or not _export["pred_rows"]:
+            return jsonify(error="No export ready"), 404
+        rows = list(_export["pred_rows"])
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "prob", "label", "state",
+                "hr_bpm", "rmssd_ms", "lf_hf", "resp_rate_brpm", "resp_amp"])
+    w.writerows(rows)
+    buf.seek(0)
+    return Response(
+        buf,
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="predictions_export.csv"'},
+    )
+
+
 # ── main page ─────────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
@@ -400,10 +491,36 @@ HTML = """<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  /* ── colour tokens ── */
+  body {
+    --bg:        #0f1117;
+    --bg-card:   #1a1d27;
+    --bg-input:  #12141c;
+    --bg-btn:    #1e2130;
+    --border:    #2a2d3a;
+    --text:      #e0e0e0;
+    --text-muted:#aaa;
+    --text-dim:  #555;
+    --text-card: #3a3d4a;
+    --divider:   #222530;
+  }
+  body.light {
+    --bg:        #f0f2f7;
+    --bg-card:   #ffffff;
+    --bg-input:  #e8eaf0;
+    --bg-btn:    #e2e5ee;
+    --border:    #c8ccd8;
+    --text:      #1a1d27;
+    --text-muted:#444;
+    --text-dim:  #888;
+    --text-card: #9098b0;
+    --divider:   #d8dce8;
+  }
+
   body {
     font-family: 'Segoe UI', system-ui, sans-serif;
-    background: #0f1117;
-    color: #e0e0e0;
+    background: var(--bg);
+    color: var(--text);
     height: 100vh;
     overflow: hidden;
     display: flex;
@@ -411,6 +528,7 @@ HTML = """<!DOCTYPE html>
     align-items: center;
     padding: 12px 20px;
     gap: 10px;
+    transition: background 0.2s, color 0.2s;
   }
 
   /* ── top bar ── */
@@ -428,14 +546,14 @@ HTML = """<!DOCTYPE html>
     font-weight: 600;
     letter-spacing: 0.18em;
     text-transform: uppercase;
-    color: #555;
+    color: var(--text-dim);
     margin-right: auto;
   }
 
   #profile-select {
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
-    color: #ccc;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     border-radius: 7px;
     padding: 5px 10px;
     font-size: 0.78rem;
@@ -443,9 +561,9 @@ HTML = """<!DOCTYPE html>
   }
 
   .btn {
-    background: #1e2130;
-    border: 1px solid #2a2d3a;
-    color: #aaa;
+    background: var(--bg-btn);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     border-radius: 7px;
     padding: 5px 13px;
     font-size: 0.78rem;
@@ -453,7 +571,7 @@ HTML = """<!DOCTYPE html>
     transition: background 0.15s, color 0.15s;
     white-space: nowrap;
   }
-  .btn:hover         { background: #2a2d3a; color: #fff; }
+  .btn:hover         { background: var(--border); color: var(--text); }
   .btn-primary       { background: #1e3a6e; border-color: #2a5aaa; color: #7ab0ff; }
   .btn-primary:hover { background: #2a5aaa; color: #fff; }
   .btn-danger        { background: #3a1a1a; border-color: #6a2a2a; color: #ff9090; }
@@ -463,8 +581,8 @@ HTML = """<!DOCTYPE html>
   #calib-panel {
     width: 100%;
     max-width: 1100px;
-    background: #1a1d27;
-    border: 1px solid #2a2d3a;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 10px;
     padding: 12px 16px;
     display: none;
@@ -475,16 +593,16 @@ HTML = """<!DOCTYPE html>
   #calib-panel.open { display: flex; }
 
   #calib-name {
-    background: #12141c;
-    border: 1px solid #2a2d3a;
-    color: #ccc;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     border-radius: 7px;
     padding: 5px 10px;
     font-size: 0.78rem;
     flex: 1;
     min-width: 140px;
   }
-  #calib-status { font-size: 0.72rem; color: #666; flex: 1; }
+  #calib-status { font-size: 0.72rem; color: var(--text-dim); flex: 1; }
 
   /* ── layout ── */
   .layout {
@@ -517,10 +635,10 @@ HTML = """<!DOCTYPE html>
 
   /* ── cards ── */
   .card {
-    background: #1a1d27;
+    background: var(--bg-card);
     border-radius: 12px;
-    border: 1px solid #2a2d3a;
-    transition: border-color 0.4s;
+    border: 1px solid var(--border);
+    transition: border-color 0.4s, background 0.2s;
     overflow: hidden;
     min-height: 0;
   }
@@ -531,7 +649,7 @@ HTML = """<!DOCTYPE html>
     font-size: 0.6rem;
     text-transform: uppercase;
     letter-spacing: 0.14em;
-    color: #3a3d4a;
+    color: var(--text-card);
     margin-bottom: 8px;
   }
 
@@ -545,14 +663,14 @@ HTML = """<!DOCTYPE html>
 
   #buffer-wrap { margin-top: 10px; }
   #buffer-bar-track {
-    background: #2a2d3a; border-radius: 4px;
+    background: var(--border); border-radius: 4px;
     height: 4px; overflow: hidden; margin-bottom: 5px;
   }
   #buffer-bar-fill {
     height: 100%; width: 0%; border-radius: 4px;
     background: #4a9eff; transition: width 0.4s;
   }
-  #buffer-label { font-size: 0.7rem; color: #555; }
+  #buffer-label { font-size: 0.7rem; color: var(--text-dim); }
 
   /* ── status panel ── */
   #status-panel {
@@ -567,7 +685,7 @@ HTML = """<!DOCTYPE html>
     font-size: 1.6rem;
     font-weight: 700;
     letter-spacing: 0.03em;
-    color: #888;
+    color: var(--text-dim);
     transition: color 0.4s;
     line-height: 1.1;
   }
@@ -575,7 +693,7 @@ HTML = """<!DOCTYPE html>
   .calm   { color: #4cff91 !important; }
 
   #prob-bar-track {
-    background: #2a2d3a; border-radius: 5px; height: 7px; overflow: hidden;
+    background: var(--border); border-radius: 5px; height: 7px; overflow: hidden;
   }
   #prob-bar-fill {
     height: 100%; width: 0%; border-radius: 5px;
@@ -588,15 +706,15 @@ HTML = """<!DOCTYPE html>
     display: flex;
     justify-content: space-between;
     font-size: 0.7rem;
-    color: #555;
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
 
-  .divider { border: none; border-top: 1px solid #222530; }
+  .divider { border: none; border-top: 1px solid var(--divider); }
 
   .stat-item { display: flex; flex-direction: column; gap: 1px; }
-  .stat-lbl  { font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.1em; color: #3a3d4a; }
-  .stat-val  { font-size: 0.82rem; font-weight: 600; color: #999; font-variant-numeric: tabular-nums; }
+  .stat-lbl  { font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-card); }
+  .stat-val  { font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
   /* ── signal cards ── */
   .signal-card {
@@ -622,15 +740,15 @@ HTML = """<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     justify-content: space-around;
-    border-left: 1px solid #22253200;
+    border-left: 1px solid transparent;
     padding-left: 10px;
     gap: 8px;
   }
 
   .metric       { display: flex; flex-direction: column; }
-  .metric-lbl   { font-size: 0.57rem; text-transform: uppercase; letter-spacing: 0.09em; color: #3a3d4a; }
-  .metric-val   { font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; color: #bbb; }
-  .metric-unit  { font-size: 0.58rem; color: #555; font-weight: 400; }
+  .metric-lbl   { font-size: 0.57rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-card); }
+  .metric-val   { font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+  .metric-unit  { font-size: 0.58rem; color: var(--text-dim); font-weight: 400; }
 
   /* ── calib video overlay ── */
   #calib-overlay {
@@ -648,9 +766,9 @@ HTML = """<!DOCTYPE html>
     height: 100%; width: 0%;
     background: #4a9eff; border-radius: 4px; transition: width 0.3s;
   }
-  #calib-overlay-status { font-size: 0.75rem; color: #555; }
+  #calib-overlay-status { font-size: 0.75rem; color: var(--text-dim); }
 
-  #msg-box { font-size: 0.75rem; color: #888; text-align: center; height: 14px; flex-shrink: 0; }
+  #msg-box { font-size: 0.75rem; color: var(--text-dim); text-align: center; height: 14px; flex-shrink: 0; }
   .msg-error { color: #ff5c5c !important; }
 </style>
 </head>
@@ -664,6 +782,7 @@ HTML = """<!DOCTYPE html>
   </select>
   <button class="btn btn-danger" id="btn-delete" onclick="deleteProfile()" style="display:none">Delete</button>
   <button class="btn btn-primary" onclick="openCalib()">+ Calibrate</button>
+  <button class="btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
 </div>
 
 <!-- calibration panel -->
@@ -704,6 +823,20 @@ HTML = """<!DOCTYPE html>
       <div class="stat-item">
         <span class="stat-lbl">Next update</span>
         <span class="stat-val" id="countdown">—</span>
+      </div>
+      <hr class="divider">
+      <div class="stat-item">
+        <span class="stat-lbl">Export recording</span>
+        <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+          <input id="export-secs" type="number" min="1" max="300" value="30"
+                 style="width:52px; background:var(--bg-input); border:1px solid var(--border);
+                        color:var(--text-muted); border-radius:6px; padding:3px 6px;
+                        font-size:0.75rem;" />
+          <span style="font-size:0.7rem; color:var(--text-dim);">sec</span>
+          <button class="btn" id="btn-export" onclick="startExport()"
+                  style="padding:3px 10px; font-size:0.75rem;">⏺ Record</button>
+        </div>
+        <span id="export-status" style="font-size:0.68rem; color:var(--text-dim); margin-top:3px;"></span>
       </div>
     </div>
 
@@ -1011,6 +1144,18 @@ es.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   if (msg.type === "ping") return;
 
+  if (msg.type === "export_done") {
+    const btn    = document.getElementById('btn-export');
+    const status = document.getElementById('export-status');
+    btn.disabled = false;
+    btn.textContent = '\u23fa Record';
+    status.textContent = 'Downloading\u2026';
+    window.location.href = '/api/export/signals';
+    setTimeout(() => { window.open('/api/export/predictions', '_blank'); }, 800);
+    setTimeout(() => { status.textContent = 'Done \u2713'; }, 1500);
+    return;
+  }
+
   if (msg.type === "status") {
     msgBox.textContent = msg.data.message; msgBox.className = ""; return;
   }
@@ -1087,6 +1232,44 @@ es.onmessage = (e) => {
 es.onerror = () => {
   msgBox.textContent = "Connection lost — retrying…"; msgBox.className = "msg-error";
 };
+
+async function startExport() {
+  const secs   = parseInt(document.getElementById('export-secs').value) || 30;
+  const btn    = document.getElementById('btn-export');
+  const status = document.getElementById('export-status');
+  btn.disabled = true;
+  status.textContent = 'Starting\u2026';
+  const res = await fetch('/api/export/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({seconds: secs}),
+  });
+  if (!res.ok) {
+    btn.disabled = false;
+    status.textContent = 'Error starting export.';
+    return;
+  }
+  let remaining = secs;
+  btn.textContent = '\u23f9';
+  status.textContent = `Recording\u2026 ${remaining}s left`;
+  const iv = setInterval(() => {
+    remaining--;
+    status.textContent = remaining > 0 ? `Recording\u2026 ${remaining}s left` : 'Finishing\u2026';
+    if (remaining <= 0) clearInterval(iv);
+  }, 1000);
+}
+
+function toggleTheme() {
+  const isLight = document.body.classList.toggle('light');
+  document.getElementById('theme-toggle').textContent = isLight ? '🌙' : '☀️';
+  localStorage.setItem('ss-theme', isLight ? 'light' : 'dark');
+}
+(function() {
+  if (localStorage.getItem('ss-theme') === 'light') {
+    document.body.classList.add('light');
+    document.getElementById('theme-toggle').textContent = '🌙';
+  }
+})();
 
 loadProfiles();
 </script>
