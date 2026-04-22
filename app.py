@@ -1217,6 +1217,7 @@ es.onmessage = (e) => {
     barFill.className     = isStress ? "bar-stress" : "bar-calm";
     tsEl.textContent      = d.ts;
     statusCard.className  = "card " + (isStress ? "card-stress" : "card-calm");
+    updateRelaxAudio(isStress);
 
     addTrendPoint(d.ts, d.prob, isStress);
 
@@ -1290,6 +1291,41 @@ function triggerExportDownload(btn, status) {
     btn.textContent    = '\u23fa Record';
     btn.disabled       = false;
   }, 1200);
+}
+
+// ── relax audio ───────────────────────────────────────────────────────────────
+const relaxAudio = new Audio("/media/Weightless.mp3");
+relaxAudio.loop   = true;
+relaxAudio.volume = 0;
+
+let _relaxFadeTimer = null;
+const FADE_STEP     = 0.02;   // volume change per tick
+const FADE_INTERVAL = 60;     // ms between ticks  (~3 s for full 0→1 fade)
+const TARGET_VOLUME = 0.8;
+
+function updateRelaxAudio(isStress) {
+  clearInterval(_relaxFadeTimer);
+  if (isStress) {
+    // ensure playback is running, then fade in
+    if (relaxAudio.paused) {
+      relaxAudio.volume = 0;
+      relaxAudio.play().catch(() => {});   // browser may block before first user gesture
+    }
+    _relaxFadeTimer = setInterval(() => {
+      relaxAudio.volume = Math.min(relaxAudio.volume + FADE_STEP, TARGET_VOLUME);
+      if (relaxAudio.volume >= TARGET_VOLUME) clearInterval(_relaxFadeTimer);
+    }, FADE_INTERVAL);
+  } else {
+    // fade out, then pause once silent
+    _relaxFadeTimer = setInterval(() => {
+      relaxAudio.volume = Math.max(relaxAudio.volume - FADE_STEP, 0);
+      if (relaxAudio.volume <= 0) {
+        clearInterval(_relaxFadeTimer);
+        relaxAudio.pause();
+        relaxAudio.currentTime = 0;
+      }
+    }, FADE_INTERVAL);
+  }
 }
 
 function toggleTheme() {
