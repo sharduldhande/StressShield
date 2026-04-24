@@ -56,13 +56,14 @@ calibration_state = {"pending": False, "running": False, "name": None, "windows"
 # ── export state ─────────────────────────────────────────────────────────────
 
 _export: dict = {
-    "active":     False,
-    "sig_ts":     [],
-    "sig_ecg":    [],
-    "sig_resp":   [],
-    "pred_rows":  [],   # one tuple per 5-s prediction window
-    "duration":   0,
-    "started_at": None,
+    "active":        False,
+    "sig_ts":        [],
+    "sig_ecg":       [],
+    "sig_resp":      [],
+    "pred_rows":     [],   # one tuple per 5-s prediction window
+    "duration":      0,
+    "started_at":    None,
+    "audio_enabled": True,
 }
 _export_lock = threading.Lock()
 
@@ -311,6 +312,7 @@ def detection_worker():
                         round(feats.get("resp_rate_min",       float("nan")), 4),
                         round(feats.get("resp_rate_max",       float("nan")), 4),
                         round(feats.get("resp_amplitude_mean", float("nan")), 4),
+                        1 if _export["audio_enabled"] else 0,
                     ))
 
     except Exception as e:
@@ -443,6 +445,7 @@ def api_export_start():
             sig_ts=[], sig_ecg=[], sig_resp=[],
             pred_rows=[],
             duration=seconds,
+            audio_enabled=bool(request.json.get("audio_enabled", True)),
             started_at=time.time(),
         )
     return jsonify(ok=True, seconds=seconds)
@@ -480,7 +483,8 @@ def api_export_predictions():
                 "hrv_meanNN", "hrv_sdnn", "hrv_rmssd", "hrv_pnn50",
                 "hrv_lf", "hrv_hf", "hrv_lf_hf",
                 "resp_rate_mean", "resp_rate_std", "resp_rate_min",
-                "resp_rate_max", "resp_amplitude_mean"])
+                "resp_rate_max", "resp_amplitude_mean",
+                "audio_enabled"])
     w.writerows(rows)
     buf.seek(0)
     return Response(
@@ -838,7 +842,15 @@ HTML = """<!DOCTYPE html>
       </div>
       <hr class="divider">
       <div class="stat-item">
-        <span class="stat-lbl">Export recording</span>
+        <span class="stat-lbl">Auditory Stimuli</span>
+        <div style="margin-top:4px;">
+          <button class="btn" id="btn-audio-toggle" onclick="toggleAudio()"
+                  style="padding:3px 12px; font-size:0.75rem;">🔊 ON</button>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="stat-item">
+        <span class="stat-lbl">Export Recording</span>
         <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
           <input id="export-secs" type="number" min="1" max="300" value="30"
                  style="width:52px; background:var(--bg-input); border:1px solid var(--border);
@@ -1245,7 +1257,7 @@ async function startExport() {
   const res = await fetch('/api/export/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({seconds: secs}),
+    body: JSON.stringify({seconds: secs, audio_enabled: audioEnabled}),
   });
   if (!res.ok) {
     btn.disabled = false;
@@ -1298,12 +1310,16 @@ const relaxAudio = new Audio("/media/Weightless.mp3");
 relaxAudio.loop   = true;
 relaxAudio.volume = 0;
 
-let _relaxFadeTimer = null;
-const FADE_STEP     = 0.02;   // volume change per tick
-const FADE_INTERVAL = 60;     // ms between ticks  (~3 s for full 0→1 fade)
-const TARGET_VOLUME = 0.8;
+let _relaxFadeTimer  = null;
+let currentIsStress  = false;
+let audioEnabled     = true;
+const FADE_STEP      = 0.02;   // volume change per tick
+const FADE_INTERVAL  = 60;     // ms between ticks  (~3 s for full 0→1 fade)
+const TARGET_VOLUME  = 0.8;
 
 function updateRelaxAudio(isStress) {
+  currentIsStress = isStress;
+  if (!audioEnabled) return;   // skip all audio if toggle is off
   clearInterval(_relaxFadeTimer);
   if (isStress) {
     // ensure playback is running, then fade in
@@ -1328,6 +1344,29 @@ function updateRelaxAudio(isStress) {
   }
 }
 
+function toggleAudio() {
+  audioEnabled = !audioEnabled;
+  const btn = document.getElementById('btn-audio-toggle');
+  btn.textContent  = audioEnabled ? '🔊 ON' : '🔇 OFF';
+  btn.style.opacity = audioEnabled ? '1' : '0.5';
+  if (!audioEnabled) {
+    // fade out whatever is playing right now
+    clearInterval(_relaxFadeTimer);
+    _relaxFadeTimer = setInterval(() => {
+      relaxAudio.volume = Math.max(relaxAudio.volume - FADE_STEP, 0);
+      if (relaxAudio.volume <= 0) {
+        clearInterval(_relaxFadeTimer);
+        relaxAudio.pause();
+        relaxAudio.currentTime = 0;
+      }
+    }, FADE_INTERVAL);
+  } else {
+    // re-evaluate against the current stress state
+    updateRelaxAudio(currentIsStress);
+  }
+  localStorage.setItem('ss-audio', audioEnabled ? '1' : '0');
+}
+
 function toggleTheme() {
   const isLight = document.body.classList.toggle('light');
   document.getElementById('theme-toggle').textContent = isLight ? '🌙' : '☀️';
@@ -1337,6 +1376,9 @@ function toggleTheme() {
   if (localStorage.getItem('ss-theme') === 'light') {
     document.body.classList.add('light');
     document.getElementById('theme-toggle').textContent = '🌙';
+  }
+  if (localStorage.getItem('ss-audio') === '0') {
+    toggleAudio();   // sets audioEnabled=false and updates button label
   }
 })();
 
